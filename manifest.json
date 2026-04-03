@@ -1,0 +1,35 @@
+{
+    "manifest_version": 3,
+    "name": "AI Search Engine",
+    "version": "1.0.0",
+    "description": "Local BGE Vector Search for Google Docs",
+
+    "permissions": ["offscreen", "storage"],
+
+    "host_permissions": ["https://docs.google.com/document/d/*"],
+
+    "background": {
+        "service_worker": "src/background.js",
+        "type": "module"
+    },
+
+    "content_scripts": [
+        {
+            "matches": ["https://docs.google.com/document/d/*"],
+            "js": ["src/content.js"],
+            "all_frames": true,
+            "match_about_blank": true
+        }
+    ],
+
+    "content_security_policy": {
+        "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+    },
+
+    "web_accessible_resources": [
+        {
+            "resources": ["transformers-bin/*"],
+            "matches": ["https://docs.google.com/*"]
+        }
+    ]
+}

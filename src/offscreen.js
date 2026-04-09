@@ -1,7 +1,7 @@
 // src/offscreen.js
 import { env, pipeline } from "@huggingface/transformers";
-import Papa from "papaparse";
 import { db } from "./db.js";
+import { parseOutlineRows } from "./documentParser.mjs";
 import { MSG, TARGET } from "./messages.js";
 import {
     expandDocumentText,
@@ -25,45 +25,6 @@ function sendStatus(status, progress = null) {
     });
 }
 
-function parseCsvRows(text) {
-    const result = Papa.parse(text, {
-        header: true,
-        skipEmptyLines: "greedy",
-        transformHeader: (header) =>
-            header.replace(/^\uFEFF/, "").trim().toLowerCase(),
-    });
-
-    if (result.errors.length) {
-        const [firstError] = result.errors;
-        throw new Error(`CSV parse failed: ${firstError.message}`);
-    }
-
-    const rows = (result.data || [])
-        .map((row) => ({
-            question: String(row.question ?? "").trim(),
-            answer: String(row.answer ?? "").trim(),
-        }))
-        .filter((row) => row.question || row.answer);
-
-    if (!rows.length) {
-        throw new Error(
-            "CSV must include at least one row with question or answer data.",
-        );
-    }
-
-    const fields = result.meta.fields || [];
-    const hasQuestionField = fields.includes("question");
-    const hasAnswerField = fields.includes("answer");
-
-    if (!hasQuestionField || !hasAnswerField) {
-        throw new Error(
-            'CSV must include "question" and "answer" columns.',
-        );
-    }
-
-    return rows;
-}
-
 function createDocumentId() {
     if (globalThis.crypto?.randomUUID) {
         return globalThis.crypto.randomUUID();
@@ -75,6 +36,35 @@ function getSemanticScore(queryVec, vector) {
     return queryVec.reduce((acc, v, i) => acc + v * vector[i], 0);
 }
 
+function splitQuestionAndAnswer(text) {
+    const separatorIndex = text.indexOf(":");
+
+    if (separatorIndex < 0) {
+        return {
+            question: text.trim(),
+            answer: "",
+        };
+    }
+
+    return {
+        question: text.slice(0, separatorIndex).trim(),
+        answer: text.slice(separatorIndex + 1).trim(),
+    };
+}
+
+function splitAnswerClauses(answer) {
+    return answer
+        .split("\n")
+        .flatMap((line) =>
+            line
+                .split(/(?<=[.!?;:])\s+/)
+                .map((part) => part.trim())
+                .filter(Boolean),
+        )
+        .map((part) => part.replace(/^-+\s*/, "").trim())
+        .filter((part) => part.length >= 8);
+}
+
 function buildMatches(queryVec, library) {
     return library
         .map((item) => ({
@@ -84,7 +74,42 @@ function buildMatches(queryVec, library) {
             score: getSemanticScore(queryVec, item.vector),
         }))
         .sort((a, b) => b.score - a.score)
-        .slice(0, 10);
+        .slice(0, 4);
+}
+
+async function findBestAnswerHighlight(pipe, queryVec, text) {
+    const { answer } = splitQuestionAndAnswer(text);
+    const clauses = splitAnswerClauses(answer);
+
+    if (!clauses.length) return "";
+
+    const outputs = await Promise.all(
+        clauses.map((clause) => runEmbedding(pipe, clause)),
+    );
+
+    let bestClause = "";
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    outputs.forEach((output, index) => {
+        const score = getSemanticScore(queryVec, output.data);
+        if (score > bestScore) {
+            bestScore = score;
+            bestClause = clauses[index];
+        }
+    });
+
+    return bestClause;
+}
+
+async function addAnswerHighlights(pipe, queryVec, matches) {
+    const enriched = await Promise.all(
+        matches.map(async (match, index) => ({
+            ...match,
+            highlight: await findBestAnswerHighlight(pipe, queryVec, match.text),
+        })),
+    );
+
+    return enriched;
 }
 
 function toChunkRecords(outputs, batch, documentRecord, startIndex) {
@@ -143,7 +168,9 @@ async function runEmbedding(pipe, text) {
 
 async function buildSemanticMatches(pipe, query, library) {
     const output = await runEmbedding(pipe, query);
-    return buildMatches(output.data, library);
+    const queryVec = output.data;
+    const matches = buildMatches(queryVec, library);
+    return addAnswerHighlights(pipe, queryVec, matches);
 }
 
 async function handleSearchRequest(msg) {
@@ -179,7 +206,7 @@ async function handleIndexingRequest(msg) {
     sendStatus("Preparing AI...", 0);
 
     const sourceName = msg.sourceName || "Unnamed document";
-    const rawChunks = parseCsvRows(msg.text);
+    const rawChunks = parseOutlineRows(msg.text);
     const batchSize = 10;
     const pipe = await getEmbedder();
     const existingDocument = await db.getDocumentByName(sourceName);

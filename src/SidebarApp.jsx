@@ -47,7 +47,7 @@ export function SidebarApp({
                     <div className="config-group-title">Upload Document</div>
                     <input
                         type="file"
-                        accept=".csv,text/csv"
+                        accept=".txt,text/plain"
                         className="file-input"
                         onChange={(event) =>
                             onFileSelect(event.target.files?.[0])

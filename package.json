@@ -5,7 +5,8 @@
     "scripts": {
         "dev": "vite",
         "build": "vite build",
-        "test": "node --test tests/*.test.mjs"
+        "test": "node --test tests/*.test.mjs",
+        "pre-release": "rm -rf dist dist.zip && npm run build && zip -r dist.zip dist"
     },
     "keywords": [],
     "author": "",
